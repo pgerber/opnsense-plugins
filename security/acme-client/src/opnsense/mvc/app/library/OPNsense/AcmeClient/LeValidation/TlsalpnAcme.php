@@ -80,13 +80,38 @@ class TlsalpnAcme extends Base implements LeValidationInterface
             $backend = new \OPNsense\Core\Backend();
             $interface = (string)$this->config->tlsalpn_acme_interface;
             $response = json_decode($backend->configdpRun('interface address', [$interface]));
-            // XXX Returns both IPv4 and IPv6 now. While "[0]" and
-            // "[1]" should remain in this order it would make sense
-            // to ensure "family" matches "inet" or "inet6" and/or
-            // pull both addresses for missing IPv6 support depending
-            // on how this should work.
-            if (!empty($response->$interface[0]->address)) {
-                $iplist[] = $response->$interface[0]->address;
+            foreach ($response->$interface as $if) {
+                if (!empty($if->address)) {
+                    $iplist[] = $if->address;
+                }
+	    }
+        }
+
+        // Find redirect target for IPv6
+        //
+        // Needed because redirecting to ::1 isn't allowed [1].
+        //
+        // [1]: https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=193568
+        $ipv6_redirect_addr = null;
+        if (is_ipv6_allowed() == true) {
+            $backend = new \OPNsense\Core\Backend();
+            $interface = "wan";
+            $response = json_decode($backend->configdpRun('interface address', [$interface]));
+
+            $ipv6_redirect_addr = null;
+            if (isset($response->$interface)) {
+                foreach ($response->$interface as $if) {
+                    if (!empty($if->address) && $if->family == "inet6") {
+                        $ipv6_redirect_addr = $if->address;
+                        break;
+                    }
+                }
+            }
+
+            if ($ipv6_redirect_addr != null) {
+                LeUtils::log("found IPv6 on WAN interface, will redirect traffic there ({$ipv6_redirect_addr})");
+            } else {
+                LeUtils::log("failed to find IPv6 on WAN interface ($interface), will not rewrite target address");
             }
         }
 
@@ -103,7 +128,7 @@ class TlsalpnAcme extends Base implements LeValidationInterface
                     LeUtils::log("using IPv4 address: {$ip}");
                 } elseif ((is_ipv6_allowed() == true) && (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6))) {
                     // IPv6
-                    $_dst = '::1';
+                    $_dst = $ipv6_redirect_addr != null ? $ipv6_redirect_addr : $ip;
                     $_family = 'inet6';
                     LeUtils::log("using IPv6 address: {$ip}");
                 } else {
